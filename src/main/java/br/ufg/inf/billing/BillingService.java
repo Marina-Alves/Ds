@@ -1,9 +1,14 @@
 package br.ufg.inf.billing;
 
+import br.ufg.inf.billing.domain.BillingCycle;
+import br.ufg.inf.billing.domain.Money;
+import br.ufg.inf.billing.domain.Plan;
+
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.PrintWriter;
+import java.math.BigDecimal;
 import java.net.HttpURLConnection;
 import java.net.Socket;
 import java.net.URL;
@@ -26,16 +31,22 @@ public class BillingService {
 
     private static final boolean USE_OLD_TAX = false;
 
-    public String processBilling(String customerId, String plan, int seats, String coupon,
-                                 boolean annual, String cardToken, String email, String country) {
-        double total = 0;
+    private static final BigDecimal ANNUAL_MONTHS_DISCOUNT = new BigDecimal("0.15");
+    private static final BigDecimal WELCOME_DISCOUNT = new BigDecimal("0.10");
+    private static final BigDecimal BLACK_FRIDAY_DISCOUNT = new BigDecimal("0.30");
+    private static final Money FIXED_COUPON_VALUE = Money.of("20");
+    private static final BigDecimal LOYALTY_DISCOUNT = new BigDecimal("0.05");
+    private static final BigDecimal BR_TAX_RATE = new BigDecimal("0.05");
+
+    public String processBilling(BillingCommand command) {
+        Money total = Money.ZERO;
         try {
             Connection conn = DriverManager.getConnection(
                     "jdbc:postgresql://db.billingco.internal:5432/billing",
                     System.getenv("DB_USER"), System.getenv("DB_PASSWORD"));
             PreparedStatement ps = conn.prepareStatement(
                     "SELECT name, signup_date, active FROM customers WHERE id = ?");
-            ps.setString(1, customerId);
+            ps.setString(1, command.customerId());
             ResultSet rs = ps.executeQuery();
             if (!rs.next()) {
                 return "ERROR: customer not found";
@@ -48,70 +59,52 @@ public class BillingService {
             }
 
             // calcula o preço do plano
-            double base;
-            if (plan.equals("BASIC")) {
-                base = 29.90;
-                if (seats > 1) {
-                    base = base + (seats - 1) * 9.90;
-                }
-            } else if (plan.equals("PRO")) {
-                base = 99.90;
-                if (seats > 5) {
-                    base = base + (seats - 5) * 15.0;
-                }
-            } else if (plan.equals("ENTERPRISE")) {
-                base = 499.90;
-                if (seats > 20) {
-                    base = base + (seats - 20) * 10.0;
-                }
-            } else {
-                return "ERROR: invalid plan";
+            Plan plan = command.plan();
+            Money base = plan.basePrice();
+            if (command.seats() > plan.includedSeats()) {
+                base = base.plus(plan.extraSeatPrice().times(command.seats() - plan.includedSeats()));
             }
 
             // plano anual: 12 meses com 15% de desconto
-            if (annual) {
-                base = base * 12;
-                base = base - base * 0.15;
+            if (command.cycle() == BillingCycle.ANNUAL) {
+                base = base.times(12).discount(ANNUAL_MONTHS_DISCOUNT);
             }
 
             LocalDate today = LocalDate.now();
 
             // cupons
-            if (coupon != null && !coupon.isEmpty()) {
+            if (command.hasCoupon()) {
+                String coupon = command.couponCode();
                 if (coupon.equals("WELCOME10")) {
                     if (ChronoUnit.DAYS.between(signupDate, today) <= 30) {
-                        base = base - base * 0.10;
+                        base = base.discount(WELCOME_DISCOUNT);
                     }
                 } else if (coupon.equals("BLACKFRIDAY")) {
                     if (today.getMonth() == Month.NOVEMBER) {
-                        base = base - base * 0.30;
+                        base = base.discount(BLACK_FRIDAY_DISCOUNT);
                     }
                 } else if (coupon.equals("FIXED20")) {
-                    base = base - 20;
-                    if (base < 0) {
-                        base = 0;
-                    }
+                    base = base.minus(FIXED_COUPON_VALUE).atLeastZero();
                 }
             }
 
             // fidelidade: clientes com 2 anos ou mais ganham 5%
             if (ChronoUnit.YEARS.between(signupDate, today) >= 2) {
-                base = base - base * 0.05;
+                base = base.discount(LOYALTY_DISCOUNT);
             }
 
             // imposto
-            double tax;
+            Money tax;
             if (USE_OLD_TAX) {
-                tax = base * 0.02;
+                tax = base.times(new BigDecimal("0.02"));
             } else {
-                if (country != null && country.equals("BR")) {
-                    tax = base * 0.05;
+                if ("BR".equals(command.country())) {
+                    tax = base.times(BR_TAX_RATE);
                 } else {
-                    tax = 0;
+                    tax = Money.ZERO;
                 }
             }
-            total = base + tax;
-            total = Math.round(total * 100.0) / 100.0;
+            total = base.plus(tax).rounded();
 
             // cobrança no cartão
             URL url = new URL("https://api.payments.billingco.com/v1/charges");
@@ -119,7 +112,7 @@ public class BillingService {
             http.setRequestMethod("POST");
             http.setDoOutput(true);
             http.setRequestProperty("Content-Type", "application/json");
-            String json = "{\"token\":\"" + cardToken + "\",\"amount\":" + total + ",\"currency\":\"BRL\"}";
+            String json = "{\"token\":\"" + command.cardToken() + "\",\"amount\":" + total + ",\"currency\":\"BRL\"}";
             try (OutputStream os = http.getOutputStream()) {
                 os.write(json.getBytes(StandardCharsets.UTF_8));
             }
@@ -134,8 +127,8 @@ public class BillingService {
             // grava a fatura
             PreparedStatement ins = conn.prepareStatement(
                     "INSERT INTO invoices (customer_id, amount, transaction_id, issued_at) VALUES (?, ?, ?, ?)");
-            ins.setString(1, customerId);
-            ins.setDouble(2, total);
+            ins.setString(1, command.customerId());
+            ins.setBigDecimal(2, total.amount());
             ins.setString(3, transactionId);
             ins.setDate(4, java.sql.Date.valueOf(LocalDate.now()));
             ins.executeUpdate();
@@ -147,7 +140,7 @@ public class BillingService {
                 PrintWriter out = new PrintWriter(s.getOutputStream(), true);
                 out.println("HELO billingco.com");
                 out.println("MAIL FROM:<billing@billingco.com>");
-                out.println("RCPT TO:<" + email + ">");
+                out.println("RCPT TO:<" + command.email() + ">");
                 out.println("DATA");
                 out.println("Subject: Recibo SaaS Billing Co.");
                 out.println();
