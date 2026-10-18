@@ -1,9 +1,6 @@
 # Relatório Técnico — Refatoração do núcleo financeiro da SaaS Billing Co.
-
-Implantação e Entrega de Software — 2026/2 · Engenharia de Software · INF/UFG
 Professora: Sofia Costa Paiva
-
-Dupla: _[nome 1]_ · _[nome 2]_
+Dupla: Marina Pereira Alves e João Vitor da Costa Almeida
 
 ---
 
