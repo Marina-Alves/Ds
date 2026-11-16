@@ -8,7 +8,7 @@ subtitle: "Projeto Final de Padrões Arquiteturais de Software — 1ª Entrega: 
 **Disciplina:** Padrões Arquiteturais de Software — Engenharia de Software, 2026/2\
 **Professor:** Elias Ferreira\
 **Tema:** 5 — Plataforma de Carteira Digital e Pagamentos\
-**Grupo:** Marina Pereira Alves, [demais integrantes]\
+**Grupo:** Marina Pereira Alves e Cristina Gomes\
 **Data de entrega:** 16/11/2026
 
 </div>
